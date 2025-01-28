@@ -1,0 +1,257 @@
+//@version=5
+indicator("EMA Crossover Backtest [BarScripts]", shorttitle="EMA Cross [BarScripts]", overlay=true, max_lines_count=500, max_labels_count = 500, max_boxes_count = 500, behind_chart=false)
+
+info = input.string("v1.1", "Indicator Info", options=["v1.1"], tooltip="This indicator simulates trades with the following conditions:\n\nLong trades:\nFast EMA crosses above Slow EMA\nBar closes above Fast EMA\n\nShort trades:\nFast EMA crosses below Slow EMA\nBar closes below Fast EMA\n\nIt calculates stop-loss and target prices based on the stopLossBars setting and tracks trade performance with optional higher timeframe confirmation and statistics display.\n\nVideo Tutorial: youtube.com/barscripts")
+showLongSignals = input.bool(true, "Show Long Signals", group = 'General Settings', display = display.none)
+showShortSignals = input.bool(true, "Show Short Signals", group = 'General Settings', display = display.none)
+showOverlappingTrades = input.bool(true, "Show Overlapping Trades", group = 'General Settings', tooltip="If unchecked, new trades won't be added if there is already an open trade.", display = display.none)
+showTradeLines = input.bool(false, "Show Tradelines", group = 'General Settings', display = display.none)
+showStats = input.bool(true, "Show Stats", group="General Settings", display = display.none)
+showEmas = input.bool(false, "Show EMA's", group= "General Settings", display = display.none)
+showTradeInfo = input.bool(true, "Show Trade Risk Reward", group = 'General Settings', display = display.none)
+showPnl = input.bool(false, "Show P&L", group="General Settings", display = display.none)
+showCommissions = input.bool(false, "Show Commissions", group = 'General Settings', display = display.none, tooltip="This doesn't work correctly if you use dynamic position sizing type like [Fixed Risk Amount] or [Percentage of Balance]")
+
+emaFastLength = input.int(3, "EMA Fast Length", minval=1, group= "EMA's")
+emaFast = ta.ema(close, emaFastLength)
+emaSlowLength = input.int(13, "EMA Slow Length", minval=1, group= "EMA's")
+emaSlow = ta.ema(close, emaSlowLength)
+
+stopLossType = input.string("Previous Bar(s) High / Low", "Stop Loss Type", options=["Previous Bar(s) High / Low", "Fixed"], group = 'Stop Loss', tooltip="Choose how to calculate the stop loss: Based on previous support/resistance or a fixed value.", display=display.none)
+fixedStopLossAmount = input.float(10.0, "Fixed Stop Loss Amount", minval=0.0000000001, group = 'Stop Loss', tooltip="Fixed stop loss amount in price units, used when Stop Loss Type is 'Fixed'.", display=display.none)
+stopLossBars = input.int(1, "Previous Bars Amount", tooltip = "Stop loss is placed 1 tick / pip below or above the last X bars.", group = 'Stop Loss', display=display.none)
+
+useHigherTimeframe = input.bool(false, "Use Higher Timeframe Confluence", group = 'Higher Timeframe', tooltip="The higher timeframe setting ensures alignment between the higher timeframe and the current chart by confirming that the fast EMA has crossed the slow EMA in the same direction.")
+higherTimeframe = input.timeframe("15", "Higher Timeframe Interval", display=display.none, group = 'Higher Timeframe')
+
+useTradeHours = input.bool(false, "Use Specific Trade Hours", group = 'Trade Hours')
+timezone = input.string("America/New_York", "Select Timezone", options=["America/New_York", "America/Los_Angeles", "America/Chicago", "America/Denver", "Europe/London", "Europe/Paris", "Europe/Berlin", "Asia/Tokyo", "Asia/Hong_Kong", "Asia/Singapore", "Australia/Sydney", "Australia/Melbourne", "Asia/Dubai", "Asia/Kolkata", "Etc/UTC", "Etc/GMT-1", "Etc/GMT-2", "Etc/GMT-3", "Etc/GMT-4", "Etc/GMT-5", "Etc/GMT-6", "Etc/GMT-7", "Etc/GMT-8", "Etc/GMT-9", "Etc/GMT-10", "Etc/GMT-11", "Etc/GMT-12"], display=display.none, group = 'Trade Hours')
+session = input.session("0700-1200", "Can place orders", display=display.none, group = 'Trade Hours')
+
+riskReward = input.float(1.0, "Reward / Risk Ratio", minval=0.1, group = 'Risk Management', tooltip="Reward Risk Ratio per trade.\n1 means 1:1.\n2 means 2:1 (gain twice what you lose)", display=display.none)
+positionSizingMethod = input.string("Fixed Position",  "Position Sizing Method", options=["Fixed Position", "Fixed Risk Amount", "Percentage of Balance"], group="Risk Management", tooltip="Choose how to calculate position size:\n1. Fixed Contracts: Always trade the same number of contracts.\n2. Risk-Based: Adjust position size based on stop-loss and fixed risk (e.g., $100).\n3. Percentage of Balance: Use a percentage of the current account balance.", display = display.none)
+fixedContracts = input.float(1.0, "1. Fixed Position", minval=0.1, group="Risk Management", tooltip="Number of contracts to trade when using Fixed Contracts.", display = display.none)
+fixedRisk = input.float(100.0, "2. Fixed Risk Amount", minval=0.1, group="Risk Management", tooltip="Dollar amount to risk per trade when using Risk-Based sizing.", display = display.none)
+riskPercentage = input.float(1.0, "3. - Risk Percentage (%)", minval=0.1, maxval=100.0, group="Risk Management", tooltip="Percentage of account balance to risk per trade.", display = display.none)
+accountBalance = input.float(10000.0, "3. - Account Balance ($)", minval=0.1, group="Risk Management", tooltip="Your account balance, used for Percentage of Balance sizing.", display = display.none)
+
+commissions = input.float(0.0, "Commissions per trade", minval=0.0, group="Commissions", tooltip="Commissions per trade (roundtrip). Include the cost for both entry and exit.\nThis doesn't work correctly if you use dynamic position sizing type like [Fixed Risk Amount] or [Percentage of Balance]", display = display.none)
+
+statsPosition = input.string("Top Right", "Stats position", options=["Top Right", "Bottom Right", "Bottom Center"], display=display.none, group = 'Stats')
+
+colorGreen = input.color(#00ffd0, "Wins", display = display.none, group = 'Colors')
+colorRed = input.color(#dc007d, "Losses", display = display.none, group = 'Colors')
+emaFastColor = input.color(#00bcd4, "EMA Fast Color", display = display.none, group = "Colors")
+emaSlowColor = input.color(#512da8, "EMA Slow Color", display = display.none, group = "Colors")
+statsHeaderColorBg = input.color(#011d22, "Stats - Header Background Color", display = display.none, group = 'Colors')
+statsHeaderColorText = input.color(#c8c8c8, "Stats - Header Text Color", display = display.none, group = 'Colors')
+statsValueColorBg = input.color(#011d22, "Stats - Value Background Color", display = display.none, group = 'Colors')
+statsValueColorText = input.color(#24c9e6, "Stats - Value Text Color", display = display.none, group = 'Colors')
+riskRewardOpacity = input.int(25, "Reward / Risk Opacity", minval=1, maxval=100, group = 'Colors')
+
+
+var float dynamicBalance = accountBalance
+
+calculatePositionSize(stopLoss, entryPrice) =>
+    if positionSizingMethod == "Fixed Position"
+        fixedContracts
+    else if positionSizingMethod == "Fixed Risk Amount"
+        stopLossDistance = math.abs(entryPrice - stopLoss)
+        stopLossDistance > 0 ? fixedRisk / stopLossDistance : 0
+    else if positionSizingMethod == "Percentage of Balance"
+        stopLossDistance = math.abs(entryPrice - stopLoss)
+        stopLossDistance > 0 ? (dynamicBalance * (riskPercentage / 100)) / stopLossDistance : 0
+
+formatWithCommas(value) =>
+    absValue = math.abs(value)
+    if absValue >= 1000
+        wholePart = math.floor(absValue)
+        thousandPart = math.floor(wholePart / 1000)
+        remainderPart = wholePart % 1000
+        remainderStr = str.tostring(remainderPart)
+        if remainderPart < 10
+            remainderStr := "00" + remainderStr
+        else if remainderPart < 100
+            remainderStr := "0" + remainderStr
+        formattedValue = str.tostring(thousandPart) + "," + remainderStr
+        value < 0 ? "-" + formattedValue : formattedValue
+    else
+        absValue > 1 or absValue < -1 ? str.tostring(value, "#.##") : str.tostring(value)
+
+
+plot(showEmas ? emaFast : na, color=emaFastColor, title="EMA Fast", linewidth=1, display=display.all)
+plot(showEmas ? emaSlow : na, color=emaSlowColor, title="EMA Slow", linewidth=1, display=display.all)
+
+emaFast_htf = request.security(syminfo.tickerid, higherTimeframe, ta.ema(close, emaFastLength))
+emaSlow_htf = request.security(syminfo.tickerid, higherTimeframe, ta.ema(close, emaSlowLength))
+higherTimeframeConditionLong = emaFast_htf > emaSlow_htf and close > emaFast_htf
+higherTimeframeConditionShort = emaFast_htf < emaSlow_htf and close < emaFast_htf
+
+isBearishCrossover = ta.crossover(emaSlow, emaFast) and close < emaSlow
+isBullishCrossover = ta.crossover(emaFast, emaSlow) and close > emaFast
+isValidLongSignal = showLongSignals and isBullishCrossover and (not useHigherTimeframe or higherTimeframeConditionLong)
+isValidShortSignal = showShortSignals and isBearishCrossover and (not useHigherTimeframe or higherTimeframeConditionShort)
+
+isWithinSession = not useTradeHours or not na(time(timeframe.period, session, timezone))
+
+var float[] openPrices = array.new_float()
+var float[] stopLosses = array.new_float()
+var float[] targetPrices = array.new_float()
+var int[] openTimes = array.new_int()
+var int[] openBars = array.new_int()
+var float[] entryLows = array.new_float()
+var int[] openTradeDirs = array.new_int()
+
+var int Signals = 0
+var int Days = 0
+var int wins = 0
+var int losses = 0
+var float pnl = 0
+
+lowSL = if stopLossType == "Previous Bar(s) High / Low"
+    stopLossBars == 1 ? low : math.min(low, ta.lowest(low[1], stopLossBars - 1))
+else
+    close - fixedStopLossAmount
+
+highSL = if stopLossType == "Previous Bar(s) High / Low"
+    stopLossBars == 1 ? high : math.max(high, ta.highest(high[1], stopLossBars - 1))
+else
+    close + fixedStopLossAmount
+
+if array.size(openPrices) > 0
+    for i = 0 to array.size(openPrices) - 1
+        if array.get(openBars, i) >= bar_index
+            continue
+
+        stopLoss = array.get(stopLosses, i)
+        targetPrice = array.get(targetPrices, i)
+        crossoverBar = array.get(openBars, i)
+        entryLow = array.get(entryLows, i)
+        tradeDir = array.get(openTradeDirs, i)
+
+        positionSize = calculatePositionSize(stopLoss, array.get(openPrices, i))
+
+        tradeEnd = false
+
+        if tradeDir == 1 and high >= targetPrice
+            profit = (targetPrice - array.get(openPrices, i)) * positionSize
+            pnl += profit
+            dynamicBalance += profit
+            wins += 1
+            tradeEnd := true
+            if showTradeLines
+                line.new(crossoverBar + 1, array.get(openPrices, i), bar_index, targetPrice, color=colorGreen, width=2)
+            
+        else if tradeDir == 1 and low <= stopLoss
+            loss = (array.get(openPrices, i) - stopLoss) * positionSize
+            pnl -= loss
+            dynamicBalance -= loss
+            losses += 1
+            tradeEnd := true
+            if showTradeLines
+                line.new(crossoverBar + 1, array.get(openPrices, i), bar_index, stopLoss, color=colorRed, width=2)
+
+        if tradeDir == -1 and low <= targetPrice
+            profit = (array.get(openPrices, i) - targetPrice) * positionSize
+            pnl += profit
+            dynamicBalance += profit
+            wins += 1
+            tradeEnd := true
+            if showTradeLines
+                line.new(crossoverBar + 1, array.get(openPrices, i), bar_index, targetPrice, color=colorGreen, width=2)
+        else if tradeDir == -1 and high >= stopLoss
+            loss = (stopLoss - array.get(openPrices, i)) * positionSize
+            pnl -= loss
+            dynamicBalance -= loss
+            losses += 1
+            tradeEnd := true
+            if showTradeLines
+                line.new(crossoverBar + 1, array.get(openPrices, i), bar_index, stopLoss, color=colorRed, width=2)
+            
+        labelYPosition = isValidLongSignal ? (entryLow - (10 * syminfo.mintick)) : (entryLow + 10 * syminfo.mintick)
+
+        if showTradeInfo and tradeEnd 
+            box.new(left = crossoverBar + 1, top = targetPrice, right = bar_index, bottom = array.get(openPrices, i), border_width = 0, bgcolor = color.new(colorGreen, 100 - riskRewardOpacity))
+            box.new(left = crossoverBar + 1, top = array.get(openPrices, i), right = bar_index, bottom = stopLoss, border_width = 0, bgcolor = color.new(colorRed, 100 - riskRewardOpacity))
+
+        if (tradeDir == 1 and high >= targetPrice) or (tradeDir == -1 and low <= targetPrice)
+            label.new(crossoverBar, labelYPosition, "", style=tradeDir == 1 ? label.style_triangleup : label.style_triangledown, color=colorGreen, textcolor=color.white, size=size.auto, yloc = tradeDir == 1 ? yloc.belowbar : yloc.abovebar)
+            array.remove(openPrices, i)
+            array.remove(entryLows, i)
+            array.remove(stopLosses, i)
+            array.remove(targetPrices, i)
+            array.remove(openTimes, i)
+            array.remove(openBars, i)
+            array.remove(openTradeDirs, i)
+            break
+
+        if (tradeDir == 1 and low <= stopLoss) or (tradeDir == -1 and high >= stopLoss)
+            label.new(crossoverBar, labelYPosition, "", style=tradeDir == 1 ? label.style_triangleup : label.style_triangledown, color=colorRed, textcolor=color.white, size = size.auto, yloc = tradeDir == 1 ? yloc.belowbar : yloc.abovebar)
+            array.remove(openPrices, i)
+            array.remove(entryLows, i)
+            array.remove(stopLosses, i)
+            array.remove(targetPrices, i)
+            array.remove(openTimes, i)
+            array.remove(openBars, i)
+            array.remove(openTradeDirs, i)
+            break
+
+openTradeExists = array.size(openPrices) > 0
+
+if isValidLongSignal and isWithinSession and (showOverlappingTrades or not openTradeExists)
+    array.push(openPrices, close)
+    array.push(entryLows, low)
+    array.push(stopLosses, lowSL - syminfo.mintick)
+    array.push(targetPrices, close + (close - (lowSL - syminfo.mintick)) * riskReward)
+    array.push(openTimes, time)
+    array.push(openBars, bar_index)
+    array.push(openTradeDirs, 1)
+    Signals += 1
+
+if isValidShortSignal and isWithinSession and (showOverlappingTrades or not openTradeExists)
+    array.push(openPrices, close)
+    array.push(entryLows, high)
+    array.push(stopLosses, highSL + syminfo.mintick)
+    array.push(targetPrices, close - ((highSL + syminfo.mintick) - close) * riskReward)
+    array.push(openTimes, time)
+    array.push(openBars, bar_index)
+    array.push(openTradeDirs, -1)
+    Signals += 1
+
+winPercentage = Signals > 0 ? (wins / Signals) * 100 : na
+
+var int trackedDays = na
+if (bar_index == 0 or dayofweek[1] != dayofweek)
+    Days += 1
+
+statsPos = position.top_right
+if statsPosition == 'Bottom Right'
+    statsPos := position.bottom_right
+if statsPosition == 'Bottom Center'
+    statsPos := position.bottom_center
+
+var table statsTable = table.new(statsPos, showCommissions ? 7 : 6, 2, border_color =#2e2e2e, border_width = 1)
+
+if showStats
+    table.cell(statsTable, 0, 0, "DAYS", bgcolor=statsHeaderColorBg, text_color=statsHeaderColorText, text_size = size.small, text_font_family = font.family_monospace)
+    table.cell(statsTable, 0, 1, str.tostring(Days), bgcolor=statsValueColorBg, text_color=statsValueColorText, text_size = size.small, text_font_family = font.family_monospace)
+
+    table.cell(statsTable, 1, 0, "TRADES", bgcolor=statsHeaderColorBg, text_color=statsHeaderColorText, text_size = size.small, text_font_family = font.family_monospace)
+    table.cell(statsTable, 1, 1, str.tostring(Signals), bgcolor=statsValueColorBg, text_color=statsValueColorText, text_size = size.small, text_font_family = font.family_monospace)
+
+    table.cell(statsTable, 2, 0, "WIN", bgcolor=statsHeaderColorBg, text_color=statsHeaderColorText, text_size = size.small, text_font_family = font.family_monospace)
+    table.cell(statsTable, 2, 1, str.tostring(wins), bgcolor=statsValueColorBg, text_color=colorGreen, text_size = size.small, text_font_family = font.family_monospace)
+
+    table.cell(statsTable, 3, 0, "LOSS", bgcolor=statsHeaderColorBg, text_color=statsHeaderColorText, text_size = size.small, text_font_family = font.family_monospace)
+    table.cell(statsTable, 3, 1, str.tostring(losses), bgcolor=statsValueColorBg, text_color=colorRed, text_size = size.small, text_font_family = font.family_monospace)
+
+    table.cell(statsTable, 4, 0, "WIN %", bgcolor=statsHeaderColorBg, text_color=statsHeaderColorText, text_size = size.small, text_font_family = font.family_monospace)
+    table.cell(statsTable, 4, 1, str.tostring(winPercentage, "#.##") == "NaN" ? "-" : str.tostring(winPercentage, "#.#") + "%", bgcolor=statsValueColorBg, text_color=statsValueColorText, text_size = size.small, text_font_family = font.family_monospace)
+
+    if showPnl
+        table.cell(statsTable, 5, 0, "P&L", bgcolor=statsHeaderColorBg, text_color=statsHeaderColorText, text_size = size.small, text_font_family = font.family_monospace)
+        table.cell(statsTable, 5, 1, formatWithCommas(pnl), bgcolor=statsValueColorBg, text_color=(pnl == 0 ? statsValueColorText : (pnl >= 0 ? colorGreen : colorRed)), text_size = size.small, text_font_family = font.family_monospace)
+
+    if showCommissions
+        table.cell(statsTable, 6, 0, "COMM", bgcolor=statsHeaderColorBg, text_color=statsHeaderColorText, text_size = size.small, text_font_family = font.family_monospace)
+        table.cell(statsTable, 6, 1, formatWithCommas(commissions * Signals), bgcolor=statsValueColorBg, text_color=(pnl == 0 ? statsValueColorText : (pnl >= 0 ? colorGreen : colorRed)), text_size = size.small, text_font_family = font.family_monospace)
